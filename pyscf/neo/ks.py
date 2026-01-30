@@ -1,13 +1,12 @@
 #!/usr/bin/env python
-
 '''
 Non-relativistic Kohn-Sham for NEO-DFT
 '''
 
+import copy
 import numpy
 import warnings
 from pyscf import dft, lib, scf
-from pyscf.data import nist
 from pyscf.lib import logger
 from pyscf.dft.numint import (BLKSIZE, NBINS, eval_ao, eval_rho, _scale_ao,
                               _dot_ao_ao, _dot_ao_ao_sparse)
@@ -131,7 +130,8 @@ def _hash_grids(grids):
             grids.coords[-1,-1].item() if grids.coords is not None else None,
             grids.weights.size if grids.weights is not None else None,
             grids.weights[0].item() if grids.weights is not None else None,
-            grids.weights[-1].item() if grids.weights is not None else None))
+            grids.weights[-1].item() if grids.weights is not None else None,
+        ))
 
 class InteractionCorrelation(hf.InteractionCoulomb):
     '''Inter-component Coulomb and correlation'''
@@ -141,6 +141,7 @@ class InteractionCorrelation(hf.InteractionCoulomb):
         self.grids = None
         self._elec_grids_hash = None
         self._skip_epc = False
+        #print('GBT ... finished initialization of InteractionCorrelation class in neo.ks')
 
     def _need_epc(self):
         if self.epc is None:
@@ -166,10 +167,10 @@ class InteractionCorrelation(hf.InteractionCoulomb):
         return False
 
     def get_vint(self, dm, *args, no_epc=False, **kwargs):
+        #print('GBT ... calling get_vint() from neo.ks.InteractionCorrelation')
         '''Unoptimized implementation that has duplicated electronic part
         calculations if multiple protons are present. The grids are screened
         only for this particular nucleus.'''
-        import copy
         vj = super().get_vint(dm, *args, **kwargs)
         # For nuclear initial guess, use Coulomb only
         if no_epc or \
@@ -199,6 +200,7 @@ class InteractionCorrelation(hf.InteractionCoulomb):
         ao_loc_e = mol_e.ao_loc_nr()
         ao_loc_n = mol_n.ao_loc_nr()
 
+        mf_e.grids.level = 9 #GBT added this line
         grids_e = mf_e.grids
         grids_changed = (self._elec_grids_hash != _hash_grids(grids_e))
         if grids_changed:
@@ -270,7 +272,6 @@ class InteractionCorrelation(hf.InteractionCoulomb):
         vxc_e = vxc_e + vxc_e.conj().T
 
         vxc = {}
-        # Assign epc correlation energy to electrons
         vxc['e'] = lib.tag_array(vj['e'] + vxc_e, exc=exc_sum, vj=vj['e'])
         vxc[n_type] = lib.tag_array(vj[n_type] + vxc_n, exc=0, vj=vj[n_type])
         return vxc
@@ -288,6 +289,7 @@ class KS(hf.HF):
     '''
 
     def __init__(self, mol, *args, xc=None, epc=None, **kwargs):
+        #print('GBT ... calling __init__ in neo.KS class')
         super().__init__(mol, *args, **kwargs)
         # NOTE: To prevent user error, require xc to be explicitly provided
         if xc is None:
@@ -296,34 +298,14 @@ class KS(hf.HF):
         self.epc = epc # Electron-proton correlation
 
         for t, comp in self.mol.components.items():
-            if t.startswith('n'):
-                if self.epc is None:
-                    mf = scf.RHF(comp)
-                else:
-                    mf = dft.RKS(comp, xc='HF')
-                self.components[t] = hf.general_scf(mf,
-                                                    charge=-1. * self.mol.atom_charge(comp.atom_index),
-                                                    mass=self.mol.mass[comp.atom_index] * nist.ATOMIC_MASS
-                                                         / nist.E_MASS,
-                                                    is_nucleus=True,
-                                                    nuc_occ_state=0)
-            else:
+            if not t.startswith('n'):
                 if self.unrestricted:
-                    if self.epc is None and self.xc_e.upper() == 'HF':
-                        mf = scf.UHF(comp)
-                    else:
-                        mf = dft.UKS(comp, xc=self.xc_e)
+                    mf = dft.UKS(comp, xc=self.xc_e)
                 else:
                     if getattr(comp, 'nhomo', None) is not None or comp.spin != 0:
-                        if self.epc is None and self.xc_e.upper() == 'HF':
-                            mf = scf.UHF(comp)
-                        else:
-                            mf = dft.UKS(comp, xc=self.xc_e)
+                        mf = dft.UKS(comp, xc=self.xc_e)
                     else:
-                        if self.epc is None and self.xc_e.upper() == 'HF':
-                            mf = scf.RHF(comp)
-                        else:
-                            mf = dft.RKS(comp, xc=self.xc_e)
+                        mf = dft.RKS(comp, xc=self.xc_e)
                 charge = 1.
                 if t.startswith('p'):
                     charge = -1.
@@ -333,20 +315,16 @@ class KS(hf.HF):
         #####
         self._epc_n_types = None
         self._skip_epc = False
-        if isinstance(self.components['e'], scf.hf.KohnShamDFT):
-            self._numint = self.components['e']._numint
-        else:
-            self._numint = None
+        self._numint = self.components['e']._numint
         self.grids = None
         self._elec_grids_hash = None
+        #print('GBT ... neo.KS class initialization complete ... self.grids set to None and self._elec_grids_hash set to None')
 
     def energy_elec(self, dm=None, h1e=None, vhf=None, vint=None):
         if dm is None: dm = self.make_rdm1()
         if h1e is None: h1e = self.get_hcore()
-        if vint is None:
-            vint = self.get_vint(self.mol, dm)
-            vhf = self.get_veff(self.mol, dm)
         if vhf is None: vhf = self.get_veff(self.mol, dm)
+        if vint is None: vint = self.get_vint(self.mol, dm)
         self.scf_summary['e1'] = 0
         self.scf_summary['coul'] = 0
         self.scf_summary['exc'] = 0
@@ -354,18 +332,27 @@ class KS(hf.HF):
         e2 = 0
         for t, comp in self.components.items():
             logger.debug(self, f'Component: {t}')
-            e_elec_t, e2_t = comp.energy_elec(dm[t], h1e[t], vhf[t])
+            # Assign epc correlation energy to electrons
+            if hasattr(vhf[t], 'exc') and hasattr(vint[t], 'exc'):
+                vhf[t].exc += vint[t].exc
+            if hasattr(vint[t], 'vj'):
+                vj = vint[t].vj
+            else:
+                vj = vint[t]
+            # vj acts as if a spin-insensitive one-body Hamiltonian
+            # .5 to remove double-counting
+            e_elec_t, e2_t = comp.energy_elec(dm[t], h1e[t] + vj * .5, vhf[t])
             e_elec += e_elec_t
             e2 += e2_t
             self.scf_summary['e1'] += comp.scf_summary['e1']
+            # Nucleus is RHF and its scf_summary does not have coul or exc
             if hasattr(vhf[t], 'exc'):
                 self.scf_summary['coul'] += comp.scf_summary['coul']
                 self.scf_summary['exc'] += comp.scf_summary['exc']
-            elif 'e2' in comp.scf_summary:
-                self.scf_summary['coul'] += comp.scf_summary['e2']
         return e_elec, e2
 
     def get_vint_slow(self, mol=None, dm=None):
+        #print('GBT ... calling get_vint_slow() from neo.ks.KS')
         '''Inter-type Coulomb and possible epc, slow version'''
         if mol is None: mol = self.mol
         if dm is None: dm = self.make_rdm1()
@@ -393,15 +380,11 @@ class KS(hf.HF):
                         vint[t] = lib.tag_array(vint[t] + v[t], exc=vint[t].exc, vj=vint[t].vj + v[t])
                     else:
                         vint[t] += v[t]
-        # Transfer vint to cache
-        for t in self.components.keys():
-            self.components[t]._vint = vint[t]
-            vint[t] = 0
         return vint
 
     def get_vint_fast(self, mol=None, dm=None):
         '''Inter-type Coulomb and possible epc'''
-        import copy
+        ('GBT ... calling get_vint_fast() which accesses grid objects')
         if mol is None: mol = self.mol
         if dm is None: dm = self.make_rdm1()
 
@@ -417,7 +400,12 @@ class KS(hf.HF):
 
         mf_e = self.components['e']
         grids_e = mf_e.grids
+        #print('GBT ... adding line below which modifies mf_e.grids.level')
+        mf_e.grids.level = 9 #GBT added this line
+        grids_e = mf_e.grids #GBT added this line too
+        #print('GBT ... added line above which modifies mf_e.grids.level')
         grids_changed = (self._elec_grids_hash != _hash_grids(grids_e))
+        #print('GBT added this line which prints Boolean of grids_changed: ', grids_changed)
         if grids_changed and self._epc_n_types is not None:
             if len(self._epc_n_types) > 0:
                 self._skip_epc = False
@@ -542,110 +530,46 @@ class KS(hf.HF):
             vxc_n[n_type] = vxc_n[n_type] + vxc_n[n_type].conj().T
 
         vxc = vj
-        # Assign epc correlation energy to electrons
-        # vj is dummy (all zero). Actual vj is already transferred to _vint
-        vxc['e'] = lib.tag_array(self.components['e']._vint + vxc_e,
-                                 exc=exc_sum, vj=self.components['e']._vint)
+        vxc['e'] = lib.tag_array(vj['e'] + vxc_e, exc=exc_sum, vj=vj['e'])
         for n_type in n_types:
-            vxc[n_type] = lib.tag_array(self.components[n_type]._vint + vxc_n[n_type],
-                                        exc=0, vj=self.components[n_type]._vint)
+            vxc[n_type] = lib.tag_array(vj[n_type] + vxc_n[n_type], exc=0, vj=vj[n_type])
 
-        # Transfer vxc to vint cache
-        for t in self.components.keys():
-            self.components[t]._vint = vxc[t]
-            vxc[t] = 0
         return vxc
 
     get_vint = get_vint_fast
 
-    def copy(self):
-        '''Shallow copy but special treatment for array/dict that may get in-place mutations'''
-        new = scf.hf.SCF.copy(self) # shallow copy. Do not call neo.HF.copy
-
-        # Rebind attributes that will get in-place mutations
-        if hasattr(self, 'f') and self.f is not None:
-            new.f = numpy.array(self.f, copy=True)
-
-        new.components = {}
-        for t, comp in self.components.items():
-            new.components[t] = hf.general_scf(comp.undo_component().copy(),
-                                               charge=comp.charge,
-                                               mass=comp.mass,
-                                               is_nucleus=comp.is_nucleus,
-                                               nuc_occ_state=comp.nuc_occ_state)
-
-        new.interactions = hf.generate_interactions(new.components, InteractionCorrelation,
-                                                    new.max_memory, epc=new.epc)
-        # properly link to the new one
-        if isinstance(new.components['e'], scf.hf.KohnShamDFT):
-            new._numint = new.components['e']._numint
-        else:
-            new._numint = None
-        return new
-
     def reset(self, mol=None):
         '''Reset mol and relevant attributes associated to the old mol object'''
-        if mol is not None:
-            self.mol = mol
-        scf.hf.SCF.reset(self, mol=mol) # do not call neo.HF.reset
-        if sorted(self.components.keys()) == sorted(self.mol.components.keys()):
-            # quantum nuc is the same, reset each component
-            for t, comp in self.components.items():
-                comp.reset(self.mol.components[t])
-                comp._vint = None
+        old_keys = sorted(self.components.keys())
+        super().reset(mol=mol)
+        if old_keys == sorted(self.components.keys()):
+            # reset grids in interactions
             for t, comp in self.interactions.items():
-                comp._eri = None
-                # reset grids in interactions
                 comp.grids = None
                 comp._elec_grids_hash = None
                 comp._skip_epc = False
         else:
             # quantum nuc is different, need to rebuild
-            self.components.clear()
             for t, comp in self.mol.components.items():
-                if t.startswith('n'):
-                    if self.epc is None:
-                        mf = scf.RHF(comp)
-                    else:
-                        mf = dft.RKS(comp, xc='HF')
-                    self.components[t] = hf.general_scf(mf,
-                                                        charge=-1. * self.mol.atom_charge(comp.atom_index),
-                                                        mass=self.mol.mass[comp.atom_index] * nist.ATOMIC_MASS
-                                                             / nist.E_MASS,
-                                                        is_nucleus=True,
-                                                        nuc_occ_state=0)
-                else:
+                if not t.startswith('n'):
                     if self.unrestricted:
-                        if self.epc is None and self.xc_e.upper() == 'HF':
-                            mf = scf.UHF(comp)
-                        else:
-                            mf = dft.UKS(comp, xc=self.xc_e)
+                        mf = dft.UKS(comp, xc=self.xc_e)
                     else:
                         if getattr(comp, 'nhomo', None) is not None or comp.spin != 0:
-                            if self.epc is None and self.xc_e.upper() == 'HF':
-                                mf = scf.UHF(comp)
-                            else:
-                                mf = dft.UKS(comp, xc=self.xc_e)
+                            mf = dft.UKS(comp, xc=self.xc_e)
                         else:
-                            if self.epc is None and self.xc_e.upper() == 'HF':
-                                mf = scf.RHF(comp)
-                            else:
-                                mf = dft.RKS(comp, xc=self.xc_e)
+                            mf = dft.RKS(comp, xc=self.xc_e)
                     charge = 1.
                     if t.startswith('p'):
                         charge = -1.
                     self.components[t] = hf.general_scf(mf, charge=charge)
-            self.interactions.clear()
-            self.interactions.update(hf.generate_interactions(self.components,
-                                                              InteractionCorrelation,
-                                                              self.max_memory, epc=self.epc))
+            self.interactions = hf.generate_interactions(self.components,
+                                                         InteractionCorrelation,
+                                                         self.max_memory, epc=self.epc)
         # EPC grids
         self._epc_n_types = None
         self._skip_epc = False
-        if isinstance(self.components['e'], scf.hf.KohnShamDFT):
-            self._numint = self.components['e']._numint
-        else:
-            self._numint = None
+        self._numint = self.components['e']._numint
         self.grids = None
         self._elec_grids_hash = None
         return self
